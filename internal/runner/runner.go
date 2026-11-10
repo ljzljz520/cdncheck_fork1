@@ -210,17 +210,22 @@ func (r *Runner) processInputItemSingle(item string, output chan Output) {
 
 	var matched bool
 	var provider, itemType string
+	var candidates []cdncheck.PrefixCandidate
 	var err error
 
 	var targetIp string
 	if iputils.IsIP(item) {
-		matched, provider, itemType, err = r.cdnclient.Check(net.ParseIP(item))
+		candidates, itemType, err = r.cdnclient.CheckCandidates(net.ParseIP(item))
+		matched = len(candidates) > 0
+		if matched {
+			provider = candidates[0].Provider
+		}
 		targetIp = item
 	} else {
 		matched, provider, itemType, err = r.cdnclient.CheckDomainWithFallback(item)
-		dnsData, err := r.cdnclient.GetDnsData(item)
+		dnsData, dnsErr := r.cdnclient.GetDnsData(item)
 
-		if err == nil {
+		if dnsErr == nil {
 			if len(dnsData.AAAA) > 0 {
 				targetIp = dnsData.AAAA[0]
 			} else if len(dnsData.A) > 0 {
@@ -233,6 +238,7 @@ func (r *Runner) processInputItemSingle(item string, output chan Output) {
 	}
 
 	data.itemType = itemType
+	data.Matches = candidates
 	data.IP = targetIp
 	data.Timestamp = time.Now()
 
@@ -272,41 +278,59 @@ func (r *Runner) processInputItemSingle(item string, output chan Output) {
 	}
 }
 
+// candidateProviders returns every provider attribution of the result.
+// Prefix based results carry the full candidate set; suffix based results
+// (which only have a single winner) fall back to the winner name so existing
+// matcher/filter behavior is preserved.
+func candidateProviders(data Output) []string {
+	if len(data.Matches) > 0 {
+		providers := make([]string, 0, len(data.Matches))
+		for _, candidate := range data.Matches {
+			providers = append(providers, candidate.Provider)
+		}
+		return providers
+	}
+	switch data.itemType {
+	case "cdn":
+		if data.CdnName != "" {
+			return []string{data.CdnName}
+		}
+	case "cloud":
+		if data.CloudName != "" {
+			return []string{data.CloudName}
+		}
+	case "waf":
+		if data.WafName != "" {
+			return []string{data.WafName}
+		}
+	}
+	return nil
+}
+
 func matchIP(options *Options, data Output) bool {
 	if len(options.MatchCdn) == 0 && len(options.MatchCloud) == 0 && len(options.MatchWaf) == 0 {
 		return true
 	}
-	if len(options.MatchCdn) > 0 && data.itemType == "cdn" {
-		matched := false
-		for _, filter := range options.MatchCdn {
-			if filter == data.CdnName {
-				matched = true
-			}
-		}
-		if matched {
-			return true
-		}
+	var matchers []string
+	switch data.itemType {
+	case "cdn":
+		matchers = options.MatchCdn
+	case "cloud":
+		matchers = options.MatchCloud
+	case "waf":
+		matchers = options.MatchWaf
 	}
-	if len(options.MatchCloud) > 0 && data.itemType == "cloud" {
-		matched := false
-		for _, filter := range options.MatchCloud {
-			if filter == data.CloudName {
-				matched = true
-			}
-		}
-		if matched {
-			return true
-		}
+	if len(matchers) == 0 {
+		return false
 	}
-	if len(options.MatchWaf) > 0 && data.itemType == "waf" {
-		matched := false
-		for _, filter := range options.MatchWaf {
-			if filter == data.WafName {
-				matched = true
+	// decide on the full candidate set: an item matches as soon as any of
+	// its attributions is requested, even when another provider wins the
+	// longest-prefix adjudication.
+	for _, provider := range candidateProviders(data) {
+		for _, filter := range matchers {
+			if filter == provider {
+				return true
 			}
-		}
-		if matched {
-			return true
 		}
 	}
 	return false
@@ -316,23 +340,23 @@ func filterIP(options *Options, data Output) bool {
 	if len(options.FilterCdn) == 0 && len(options.FilterCloud) == 0 && len(options.FilterWaf) == 0 {
 		return false
 	}
-	if len(options.FilterCdn) > 0 && data.itemType == "cdn" {
-		for _, filter := range options.FilterCdn {
-			if filter == data.CdnName {
-				return true
-			}
-		}
+	var filters []string
+	switch data.itemType {
+	case "cdn":
+		filters = options.FilterCdn
+	case "cloud":
+		filters = options.FilterCloud
+	case "waf":
+		filters = options.FilterWaf
 	}
-	if len(options.FilterCloud) > 0 && data.itemType == "cloud" {
-		for _, filter := range options.FilterCloud {
-			if filter == data.CloudName {
-				return true
-			}
-		}
+	if len(filters) == 0 {
+		return false
 	}
-	if len(options.FilterWaf) > 0 && data.itemType == "waf" {
-		for _, filter := range options.FilterWaf {
-			if filter == data.WafName {
+	// decide on the full candidate set: the item is filtered out when any
+	// attribution points to a provider the user asked to exclude.
+	for _, provider := range candidateProviders(data) {
+		for _, filter := range filters {
+			if filter == provider {
 				return true
 			}
 		}

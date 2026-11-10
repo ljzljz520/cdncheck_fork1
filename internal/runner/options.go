@@ -26,7 +26,11 @@ type Output struct {
 	CloudName string    `json:"cloud_name,omitempty"`
 	Waf       bool      `json:"waf,omitempty"`
 	WafName   string    `json:"waf_name,omitempty"`
-	itemType  string
+	// Matches retains every provider/prefix attribution (the adjudication
+	// basis) behind CdnName/CloudName/WafName, ordered by longest prefix first
+	// and then by provider identifier. It is empty for suffix based matches.
+	Matches  []cdncheck.PrefixCandidate `json:"matches,omitempty"`
+	itemType string
 }
 
 func (o *Output) String() string {

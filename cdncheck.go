@@ -69,6 +69,13 @@ func New() *Client {
 
 // NewWithOpts creates cdncheck client with custom options
 func NewWithOpts(MaxRetries int, resolvers []string) (*Client, error) {
+	return NewWithData(generatedData, MaxRetries, resolvers)
+}
+
+// NewWithData creates a cdncheck client from custom compiled provider data.
+// It allows callers to run the same detection logic against their own set of
+// CDN, WAF and Cloud ranges.
+func NewWithData(data InputCompiled, MaxRetries int, resolvers []string) (*Client, error) {
 	if MaxRetries <= 0 {
 		MaxRetries = 3
 	}
@@ -80,9 +87,9 @@ func NewWithOpts(MaxRetries int, resolvers []string) (*Client, error) {
 		return nil, err
 	}
 	client := &Client{
-		cdn:          newProviderScraper(generatedData.CDN),
-		waf:          newProviderScraper(generatedData.WAF),
-		cloud:        newProviderScraper(generatedData.Cloud),
+		cdn:          newProviderScraper(data.CDN),
+		waf:          newProviderScraper(data.WAF),
+		cloud:        newProviderScraper(data.Cloud),
 		retriabledns: retryabledns,
 	}
 	return client, nil
@@ -118,6 +125,36 @@ func (c *Client) Check(ip net.IP) (matched bool, value string, itemType string, 
 		return matched, value, "cloud", nil
 	}
 	return false, "", "", err
+}
+
+// CheckCandidates returns the full set of provider/prefix attributions for ip
+// instead of a single winner. The established category priority is preserved:
+// attributions are looked up in the first matching category (cdn, then waf,
+// then cloud) and the selected category is returned as itemType.
+//
+// Candidates are ordered by longest matching prefix first, and for equal
+// prefix lengths by provider identifier. When no category matches, an empty
+// slice and an empty itemType are returned.
+func (c *Client) CheckCandidates(ip net.IP) (candidates []PrefixCandidate, itemType string, err error) {
+	if candidates, err = c.cdn.Candidates(ip); err != nil {
+		return nil, "", err
+	}
+	if len(candidates) > 0 {
+		return candidates, "cdn", nil
+	}
+	if candidates, err = c.waf.Candidates(ip); err != nil {
+		return nil, "", err
+	}
+	if len(candidates) > 0 {
+		return candidates, "waf", nil
+	}
+	if candidates, err = c.cloud.Candidates(ip); err != nil {
+		return nil, "", err
+	}
+	if len(candidates) > 0 {
+		return candidates, "cloud", nil
+	}
+	return nil, "", nil
 }
 
 // Check Domain with fallback checks if domain belongs to one of CDN, WAF and Cloud . It is generic method for Checkxxx methods
